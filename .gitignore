@@ -1,0 +1,12 @@
+.env
+__pycache__/
+.venv/
+uploads/
+*.pyc
+.DS_Store
+venv/
+.venv/
+.env
+uploads/
+.DS_Store
+__pycache__/
