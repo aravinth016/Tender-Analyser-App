@@ -38,6 +38,16 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///app.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
+# --- ADDED: FORCE SSL FOR TiDB SERVERLESS ---
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'connect_args': {
+        'ssl': {
+            'ssl_verify_cert': True,
+            'ssl_verify_identity': True
+        }
+    }
+}
+
 # --- CLOUDINARY CONFIGURATION ---
 cloudinary.config(
     cloud_name=os.environ.get('CLOUDINARY_CLOUD_NAME'),
