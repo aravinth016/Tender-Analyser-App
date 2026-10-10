@@ -13,9 +13,9 @@ from flask_cors import CORS
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 
-# --- CLOUDINARY IMPORT ---
-import cloudinary
-import cloudinary.uploader
+# --- FIREBASE STORAGE IMPORT ---
+import firebase_admin
+from firebase_admin import credentials, storage
 
 # --- ML & OCR IMPORTS ---
 import PyPDF2
@@ -38,7 +38,7 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///app.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# --- ADDED: FORCE SSL FOR TiDB SERVERLESS ---
+# --- FORCE SSL FOR TiDB SERVERLESS ---
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'connect_args': {
         'ssl': {
@@ -48,35 +48,67 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     }
 }
 
-# --- CLOUDINARY CONFIGURATION ---
-cloudinary.config(
-    cloud_name=os.environ.get('CLOUDINARY_CLOUD_NAME'),
-    api_key=os.environ.get('CLOUDINARY_API_KEY'),
-    api_secret=os.environ.get('CLOUDINARY_API_SECRET'),
-    secure=True
-)
+# --- FIREBASE STORAGE CONFIGURATION ---
+FIREBASE_CRED_PATH = os.environ.get('FIREBASE_CRED_PATH', 'serviceAccountKey.json')
+FIREBASE_CRED_JSON = os.environ.get('FIREBASE_CRED_JSON')
+FIREBASE_STORAGE_BUCKET = os.environ.get('FIREBASE_STORAGE_BUCKET') # e.g. 'your-project-id.firebasestorage.app'
+
+if FIREBASE_CRED_JSON:
+    try:
+        cred_dict = json.loads(FIREBASE_CRED_JSON)
+        cred = credentials.Certificate(cred_dict)
+    except Exception as e:
+        print(f"⚠️ Failed to parse FIREBASE_CRED_JSON: {e}")
+        cred = None
+elif os.path.exists(FIREBASE_CRED_PATH):
+    cred = credentials.Certificate(FIREBASE_CRED_PATH)
+else:
+    cred = None
+    print("⚠️ FIREBASE NOTICE: No serviceAccountKey.json found locally or FIREBASE_CRED_JSON in env.")
+
+if cred:
+    try:
+        firebase_admin.initialize_app(cred, {
+            'storageBucket': FIREBASE_STORAGE_BUCKET
+        })
+        print("✅ Firebase Admin SDK initialized successfully.")
+    except Exception as e:
+        print(f"⚠️ Firebase initialization error: {e}")
 
 db = SQLAlchemy(app)
 
 
-def upload_to_cloudinary(file_obj, folder="tender_app"):
-    """Helper function to upload files to Cloudinary and return HTTPS URL."""
+def upload_to_firebase(file_obj, folder="tender_app"):
+    """Helper function to upload files to Firebase Storage and return HTTPS public URL."""
     if not file_obj or file_obj.filename == '':
         return None
     try:
-        response = cloudinary.uploader.upload(
-            file_obj,
-            folder=folder,
-            resource_type="auto"
-        )
-        return response.get('secure_url')
+        filename = secure_filename(file_obj.filename)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        unique_filename = f"{timestamp}_{filename}"
+        blob_path = f"{folder}/{unique_filename}"
+        
+        bucket = storage.bucket()
+        blob = bucket.blob(blob_path)
+        
+        content_type = getattr(file_obj, 'content_type', None) or 'application/octet-stream'
+        
+        if hasattr(file_obj, 'seek'):
+            file_obj.seek(0)
+            
+        blob.upload_from_file(file_obj, content_type=content_type)
+        
+        # Make the file publicly accessible (prevents 401 ACL/permission errors)
+        blob.make_public()
+        
+        return blob.public_url
     except Exception as e:
-        print(f"❌ Cloudinary Upload Error: {str(e)}")
+        print(f"❌ Firebase Upload Error: {str(e)}")
         return None
 
 
 def get_file_url(path):
-    """Helper function to format local paths vs Cloudinary HTTPS URLs."""
+    """Helper function to format local paths vs Firebase HTTPS URLs."""
     if not path:
         return None
     if path.startswith("http://") or path.startswith("https://"):
@@ -236,7 +268,7 @@ ml_bid_predictor = train_optimal_bid_predictor()
 def extract_text_from_pdf(pdf_path_or_url):
     try:
         text = ""
-        # Handle Cloudinary Remote URLs
+        # Handle Remote Firebase/HTTPS URLs
         if pdf_path_or_url.startswith("http://") or pdf_path_or_url.startswith("https://"):
             response = requests.get(pdf_path_or_url)
             file_bytes = io.BytesIO(response.content)
@@ -247,7 +279,7 @@ def extract_text_from_pdf(pdf_path_or_url):
                     text += extracted + " "
             
             if len(text.strip()) < 50:
-                print(f"🔍 Scanned Cloudinary document detected. Running Tesseract OCR...")
+                print(f"🔍 Scanned remote document detected. Running Tesseract OCR...")
                 with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as temp_pdf:
                     temp_pdf.write(response.content)
                     temp_pdf.flush()
@@ -401,9 +433,9 @@ def register():
         if not all([gst, inc, pan]):
             return jsonify({"success": False, "message": "Missing mandatory documents"}), 400
 
-        gst_url = upload_to_cloudinary(gst, folder="user_docs")
-        inc_url = upload_to_cloudinary(inc, folder="user_docs")
-        pan_url = upload_to_cloudinary(pan, folder="user_docs")
+        gst_url = upload_to_firebase(gst, folder="user_docs")
+        inc_url = upload_to_firebase(inc, folder="user_docs")
+        pan_url = upload_to_firebase(pan, folder="user_docs")
 
         new_user = User(
             full_name=data.get('full_name'), email=email,
@@ -497,7 +529,7 @@ def update_profile():
         if 'profile_image' in request.files:
             file = request.files['profile_image']
             if file.filename != '':
-                pic_url = upload_to_cloudinary(file, folder="profiles")
+                pic_url = upload_to_firebase(file, folder="profiles")
                 if pic_url:
                     user.profile_pic_path = pic_url
 
@@ -577,7 +609,7 @@ def update_compliance_docs():
         if file_key in request.files:
             file_obj = request.files[file_key]
             if file_obj and file_obj.filename != '':
-                doc_url = upload_to_cloudinary(file_obj, folder="compliance_docs")
+                doc_url = upload_to_firebase(file_obj, folder="compliance_docs")
                 if doc_url:
                     setattr(user, attr_name, doc_url)
 
@@ -615,14 +647,14 @@ def update_gst_pan():
         if 'new_gst_certificate' in request.files:
             gst_file = request.files['new_gst_certificate']
             if gst_file.filename != '':
-                gst_url = upload_to_cloudinary(gst_file, folder="user_docs")
+                gst_url = upload_to_firebase(gst_file, folder="user_docs")
                 if gst_url:
                     user.gst_cert_path = gst_url
 
         if 'new_pan_card' in request.files:
             pan_file = request.files['new_pan_card']
             if pan_file.filename != '':
-                pan_url = upload_to_cloudinary(pan_file, folder="user_docs")
+                pan_url = upload_to_firebase(pan_file, folder="user_docs")
                 if pan_url:
                     user.pan_card_path = pan_url
 
@@ -656,7 +688,7 @@ def submit_bid():
         for key in file_keys:
             f = request.files.get(key)
             if f and f.filename != '':
-                doc_url = upload_to_cloudinary(f, folder="bids")
+                doc_url = upload_to_firebase(f, folder="bids")
                 if doc_url:
                     paths[key] = doc_url
 
@@ -779,10 +811,10 @@ def admin_register():
         if not all([auth_letter, id_proof, dsc_key, dept_reg]):
             return jsonify({"success": False, "message": "Missing mandatory documents"}), 400
 
-        al_url = upload_to_cloudinary(auth_letter, folder="authority_docs")
-        id_url = upload_to_cloudinary(id_proof, folder="authority_docs")
-        dsc_url = upload_to_cloudinary(dsc_key, folder="authority_docs")
-        dept_url = upload_to_cloudinary(dept_reg, folder="authority_docs")
+        al_url = upload_to_firebase(auth_letter, folder="authority_docs")
+        id_url = upload_to_firebase(id_proof, folder="authority_docs")
+        dsc_url = upload_to_firebase(dsc_key, folder="authority_docs")
+        dept_url = upload_to_firebase(dept_reg, folder="authority_docs")
 
         new_auth = Authority(
             admin_name=data.get('adminName') or "Unknown", designation=data.get('designation') or "Unknown",
@@ -860,7 +892,7 @@ def update_authority_profile():
         if 'profile_image' in request.files:
             file = request.files['profile_image']
             if file.filename != '':
-                pic_url = upload_to_cloudinary(file, folder="profiles")
+                pic_url = upload_to_firebase(file, folder="profiles")
                 if pic_url:
                     admin.profile_pic_path = pic_url
 
@@ -940,7 +972,7 @@ def update_admin_docs():
         if file_key in request.files:
             file_obj = request.files[file_key]
             if file_obj and file_obj.filename != '':
-                doc_url = upload_to_cloudinary(file_obj, folder="authority_docs")
+                doc_url = upload_to_firebase(file_obj, folder="authority_docs")
                 if doc_url:
                     setattr(admin, attr_name, doc_url)
 
@@ -962,7 +994,7 @@ def create_tender():
         for file_key in request.files:
             for doc in request.files.getlist(file_key):
                 if doc.filename != '':
-                    doc_url = upload_to_cloudinary(doc, folder="tenders")
+                    doc_url = upload_to_firebase(doc, folder="tenders")
                     if doc_url:
                         uploaded_paths.append(doc_url)
         docs_json = json.dumps(uploaded_paths) if uploaded_paths else "[]"
@@ -1012,7 +1044,7 @@ def update_tender():
         for file_key in request.files:
             for doc in request.files.getlist(file_key):
                 if doc.filename != '':
-                    doc_url = upload_to_cloudinary(doc, folder="tenders")
+                    doc_url = upload_to_firebase(doc, folder="tenders")
                     if doc_url:
                         existing_docs.append(doc_url)
         tender.tender_docs = json.dumps(existing_docs)
